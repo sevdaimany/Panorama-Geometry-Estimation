@@ -1,0 +1,27 @@
+dap_config_path: "vendor/DAP/config/infer.yaml"
+dap_load_weights_dir: "vendor/DAP/weights"
+
+load_weights_from: "./cyws-3d.ckpt"
+registration_strategy: "3d"
+input_size: [1536, 640]
+apply_resize: False
+intraclasse: False
+use_magsac: True
+
+output_dir: "training_artifacts"
+depth_model: 'dap' # 'unidepth' or 'dap'
+matching_model: 'romav2' # 'superglue' or 'romav2' or 'roma'
+
+
+use_mapanything: True
+mapanything_model_name: "facebook/map-anything"
+depthanything_model_name: "depth-anything/DA3NESTED-GIANT-LARGE-1.1"
+translation_tolerance: 3
+face_size: 518
+num_views: 8  # (8 views = 45 degree steps)
+fov_degrees: 90.0
+output_dir_ext: 'results'
+
+# data_path_ext: "/mnt/stores/store-DAI/pocs/simany/results_pipeline/v1.2/data/"
+data_path_ext: "diff_sequences"
+save_correspondences: True

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pose_estimation"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+  "shapely"
+]
+
+[tool.setuptools]
+# Map directly to the vendor folder in the root, no "src/" prefix
+package-dir = { "DAP" = "vendor/DAP", "romav2" = "vendor/RoMaV2/src/romav2", "mapanything" = "vendor/map-anything/mapanything", "depth_anything_3" = "vendor/Depth-Anything-3/src/depth_anything_3" }
+
+# Expose the vendor packages
+packages = ["DAP", "romav2", "mapanything", "depth_anything_3"]
+
+py-modules = ["correspondence_extractor", "DeepCameraPoseEstimator", "DFRMCameraPoseEstimator", "geometry", "main", "torch_compat_patch"]
