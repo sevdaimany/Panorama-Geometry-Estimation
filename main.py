@@ -10,7 +10,33 @@ from DFRMCameraPoseEstimator import DFRMPoseEstimator
 from DeepCameraPoseEstimator import CameraPoseEstimator
 from DepthEstimation import DepthEstimation
 from PIL import Image
+import torchvision.utils as vutils
+import itertools
+import matplotlib.pyplot as plt
+import random
+import numpy as np
 
+
+
+def seed_everything(seed=42):
+    """Locks all sources of randomness for reproducible results."""
+    # 1. Python built-in randomness
+    random.seed(seed)
+    
+    # 2. NumPy randomness (Used heavily in data prep)
+    np.random.seed(seed)
+    
+    # 3. OpenCV randomness (CRITICAL for MAGSAC/RANSAC)
+    cv2.setRNGSeed(seed)
+    
+    # 4. PyTorch randomness
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed) # For multi-GPU
+    
+    # 5. Lock down CuDNN (Makes GPU operations deterministic)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def to_numpy_matrices(tensor_list):
         matrices = []
@@ -26,6 +52,22 @@ def to_numpy_matrices(tensor_list):
 def get_easy_dict_from_yaml_file(path_to_yaml_file):
     with open(path_to_yaml_file, "r") as stream:
         return EasyDict(yaml.safe_load(stream))
+
+def load_panoramas(panorama_paths, target_size_wh, save_dir=None):
+    panoramas = []
+    for path in panorama_paths:
+        pano = Image.open(path).convert('RGB')
+        if pano.size != target_size_wh:
+            print(f"[WARNING] Resizing panorama from {pano.size[0]}x{pano.size[1]} to {target_size_wh[0]}x{target_size_wh[1]}.")
+            pano = pano.resize(target_size_wh, Image.Resampling.LANCZOS)
+        panoramas.append(np.array(pano))
+
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, os.path.basename(path))
+            pano.save(save_path)
+            print(f"Saved resized panorama to {save_path}")
+    return panoramas
 
 def compare_RT_computed(image_paths, sequence_id, cfg, estimator_da3, estimator_mapanything, estimator_dfrm):
     """
@@ -48,20 +90,7 @@ def compare_RT_computed(image_paths, sequence_id, cfg, estimator_da3, estimator_
     accumulated_rts_dfrm = estimator_dfrm.estimate_trajectory(image_paths, sequence_id)
 
     # 2. Load Panoramas for Extrinsic Estimation
-    panoramas = []
-    for path, name in zip(image_paths, image_names):
-        pano = cv2.imread(path)
-
-        # resize if doesnt match cfg.input_size
-        target_size_wh = tuple(cfg.input_size) # (W, H)
-        target_size_hw = target_size_wh[::-1]  # (H, W)
-        if pano.shape != target_size_hw: # OpenCV uses (height, width)
-            print(f"[WARNING] Resizing panorama '{name}' from {pano.shape[1]}x{pano.shape[0]} to {target_size_wh[0]}x{target_size_wh[1]}.")
-            pano = cv2.resize(pano, target_size_wh, interpolation=cv2.INTER_AREA)
-
-        panoramas.append(pano)
-        # Save a copy to the output directory
-        cv2.imwrite(os.path.join(cubemap_dir, f"{name}.jpg"), pano)
+    panoramas = load_panoramas(image_paths, target_size_wh=tuple(cfg.input_size), save_dir=cubemap_dir)
 
     # 3. Compute Extrinsic Estimation RT (using MapAnything and DepthAnything3)
     print(f"\n{'='*50}\n[INFO] Running MapAnything Estimator...\n{'='*50}")
@@ -91,20 +120,18 @@ def compare_RT_computed(image_paths, sequence_id, cfg, estimator_da3, estimator_
         unique_image_name = "_".join(image_names) + model_label
         estimator_mapanything.verify_poses_visually(mat_list, image_names, sequence_id=sequence_id, image_name=unique_image_name)
 
-def compare_occlusion_masks(image_a_path, image_b_path, sequence_id, save_dir, args, device, estimator_da3, estimator_mapanything, estimator_dfrm):
+def compare_occlusion_masks(image_a_path, image_b_path, sequence_id, save_dir, cfg, device, estimator_da3, estimator_mapanything, estimator_dfrm):
     print(f"\n{'='*50}\nComparing Occlusion Masks...\n{'='*50}")
 
     torch.set_float32_matmul_precision('highest')
     dfrm_trajectory, batch = estimator_dfrm.estimate_trajectory([image_a_path, image_b_path], sequence_id, return_batch_for_one_pair=True)
-    
     Rt_1_to_2 = torch.inverse(dfrm_trajectory[1])
     Rt_2_to_1 = dfrm_trajectory[1] 
-
     estimator_dfrm.generate_occlusion_mask(image_a_path, image_b_path, sequence_id, save_dir, Rt_1_to_2, Rt_2_to_1, model_name="_dfrm", batch=batch)
     
-    pano_A = cv2.imread(image_a_path)
-    pano_B = cv2.imread(image_b_path)
-    
+
+    pano_A, pano_B = load_panoramas([image_a_path, image_b_path], target_size_wh=tuple(cfg.input_size))
+
     ma_traj = estimator_mapanything.run([pano_A, pano_B], sequence_id)
     estimator_dfrm.generate_occlusion_mask(image_a_path, image_b_path, sequence_id, save_dir, torch.inverse(ma_traj[1]), ma_traj[1], model_name="_mapanything", batch=batch)
 
@@ -112,145 +139,252 @@ def compare_occlusion_masks(image_a_path, image_b_path, sequence_id, save_dir, a
     estimator_dfrm.generate_occlusion_mask(image_a_path, image_b_path, sequence_id, save_dir, torch.inverse(da3_traj[1]), da3_traj[1], model_name="_depthanything3", batch=batch)
 
 
-# compare depth
-if __name__ == "__main__":
-    config_file = os.path.join(os.path.dirname(__file__), "config.yml")
-    args = get_easy_dict_from_yaml_file(config_file)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    depth_estimator = DepthEstimation(args)
+def run_full_pipeline(image_names_list, sequence_ids, cfg, estimators, device):
+    plot_depth_maps = True
+    plot_correspondences = True
 
+    for seq_id, image_names in zip(sequence_ids, image_names_list):
+        print(f"\n{'#'*80}\nProcessing Sequence: {seq_id}\n{'#'*80}")
+        
+        image_names_for_print = [p.split('.')[0] for p in image_names]
+
+        image_paths = [os.path.join(cfg['data_path_ext'], seq_id, name) for name in image_names]
+        
+        vis_dir = os.path.join(cfg['output_dir_ext'], 'visualization', seq_id)
+        occlusion_dir = os.path.join(vis_dir, 'occlusions')
+        poses_dir = os.path.join(vis_dir, 'poses')
+        correspondences_dir = os.path.join(vis_dir, 'correspondences')
+
+        os.makedirs(correspondences_dir, exist_ok=True)
+        os.makedirs(occlusion_dir, exist_ok=True)
+        os.makedirs(poses_dir, exist_ok=True)
+
+        # ---------------------------------------------------------
+        # PHASE 1: Pre-Cache Depths & Compute Global RTs
+        # ---------------------------------------------------------
+        print(f"\n--- Phase 1: Caching Depths and MapAnything Poses ---")
+        
+        image_cache = {}
+        panoramas = []
+        target_size_wh = tuple(cfg.input_size)
+        target_size_hw = target_size_wh[::-1]
+
+        # A) Prep panoramas for MapAnything Pose Estimation
+        panoramas = load_panoramas(image_paths, target_size_wh=target_size_wh, save_dir=vis_dir)
+
+        # B) Run MapAnything for Poses
+        rts_mapanything = estimators.mapanything.run(
+            panoramas, 
+            seq_id, 
+            save_results=True, 
+            output_dir=poses_dir, 
+            image_names=image_names_for_print
+        )
+
+        # run DFRM pose estimation to get relative RTs for all pairs (for occlusion mask generation)
+        # rts_mapanything = estimators.dfrm.estimate_trajectory(image_paths, seq_id)
+        rts_numpy = to_numpy_matrices(rts_mapanything)
+
+        
+        # C) Run DepthEstimation class for MapAnything Depth
+        # print(f"[INFO] Extracting MapAnything Depth batch...")
+        # mapanything_depths, scaling_factors = estimators.depth.run_mapanything_batch(image_paths)
+
+        # D) Cache DFRM single-image requirements (Image tensor + MapAnything depth)
+        for idx, path in enumerate(image_paths):
+            print(f"Caching MapAnything depth & image for {os.path.basename(path)}...")
+            with torch.no_grad():
+                cached_data = estimators.dfrm.preprocess_single_image(path)
+            
+            # ma_depth_numpy = mapanything_depths[idx]
+            # if (ma_depth_numpy.shape[1], ma_depth_numpy.shape[0]) != target_size_wh:
+            #     ma_depth_numpy = cv2.resize(ma_depth_numpy, target_size_wh, interpolation=cv2.INTER_NEAREST)
+            
+            # depth_tensor = torch.from_numpy(ma_depth_numpy)
+
+            depth_tensor = cached_data["depth"]  # [1, H, W], DAP
+            print(f"Original Depth Tensor Shape: {depth_tensor.shape}, Min: {depth_tensor.min().item():.4f}, Max: {depth_tensor.max().item():.4f}, Median: {torch.median(depth_tensor).item():.4f}")
+
+            # Post-process to fix zero depth values in the sky region
+            height, width = depth_tensor.shape
+            is_top_half = torch.zeros_like(depth_tensor, dtype=torch.bool)
+            is_top_half[..., :height//2, :] = True
+            zero_mask_1 = depth_tensor < 2.5 # DAP
+            # zero_mask_1 = depth_tensor < 1e-3 # MapAnything
+
+            if zero_mask_1.any():
+                print("[INFO] Found zero depth values in the depth map. Applying post-processing to fix sky regions.")
+                depth_tensor[zero_mask_1 & is_top_half] = 100.0  # Force Sky to Max Depth
+            
+            cached_data["depth"] = depth_tensor
+            # cached_data["ma_scale"] = scaling_factors[idx]
+
+            image_cache[path] = cached_data
+
+        # plots relative poses
+        for i, (rt, name) in enumerate(zip(rts_numpy, image_names_for_print)):
+            if rt is not None and i > 0:
+                estimators.mapanything.print_human_readable_pose(rt, name=f"{image_names_for_print[0]} ➔ {name})")
+        
+        unique_image_name = "_".join(image_names_for_print) 
+        estimators.mapanything.verify_poses_visually(rts_numpy, image_names_for_print, sequence_id=seq_id, image_name=unique_image_name, output_dir=poses_dir)
+
+        
+        del panoramas
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
+        # save plot depth maps for all images in the sequence in image_cache depth
+        if plot_depth_maps:
+            for path in image_paths:
+                depth_tensor = image_cache[path]['depth']
+                depth_map = depth_tensor.squeeze().cpu().numpy()
+                plt.figure(figsize=(8, 6))
+                plt.imshow(depth_map, cmap='inferno')
+                plt.title(f"Depth Map for {os.path.basename(path).split('.')[0]}")
+                plt.colorbar(label='Depth Value')
+                plt.axis('off')
+                os.makedirs(os.path.join(vis_dir, "depth"), exist_ok=True)
+                plt.savefig(os.path.join(vis_dir, "depth", f"{os.path.basename(path).split('.')[0]}.png"))
+                plt.close()
+
+
+        # ---------------------------------------------------------
+        # PHASE 2: Combinatorial Occlusion Masks
+        # ---------------------------------------------------------
+        print(f"\n--- Phase 2: Computing Occlusion Masks for All Pairs ---")
+        
+        # Create an index lookup to easily grab the corresponding MapAnything RT
+        path_to_idx = {path: idx for idx, path in enumerate(image_paths)}
+        all_pairs = list(itertools.combinations(image_paths, 2))
+        
+        for img_a_path, img_b_path in all_pairs:
+            name_a = os.path.basename(img_a_path).split('.')[0]
+            name_b = os.path.basename(img_b_path).split('.')[0]
+            idx_a, idx_b = path_to_idx[img_a_path], path_to_idx[img_b_path]
+            
+            print(f"  -> Processing pair: {name_a} & {name_b}")
+
+            # 1. Fetch from cache and prepare the pair batch (only calculates correspondences)
+            with torch.no_grad():
+                batch = estimators.dfrm.prepare_pair_from_cache(
+                    image_cache[img_a_path], 
+                    image_cache[img_b_path]
+                )
+            
+            # # 2. Calculate RELATIVE RTs from MapAnything Global Poses
+            pose_A = rts_mapanything[idx_a].to(device)
+            pose_B = rts_mapanything[idx_b].to(device)
+            
+            Rt_1_to_2 = torch.inverse(pose_B) @ pose_A 
+            Rt_2_to_1 = torch.inverse(pose_A) @ pose_B
+
+            # 3. Generate visual tensors
+            with torch.no_grad():
+                vis_outputs = estimators.dfrm.generate_occlusion_mask_tensors(batch, Rt_1_to_2, Rt_2_to_1)
+            
+            # 4. Save results
+            pair_label = f"{name_a}_to_{name_b}"
+            vutils.save_image(vis_outputs["side_by_side_1"], os.path.join(occlusion_dir, f"{pair_label}_side_by_side_1.png"))
+            vutils.save_image(vis_outputs["side_by_side_2"], os.path.join(occlusion_dir, f"{pair_label}_side_by_side_2.png"))
+            vutils.save_image(vis_outputs["mask_1"], os.path.join(occlusion_dir, f"{pair_label}_mask_1.png"))
+            vutils.save_image(vis_outputs["mask_2"], os.path.join(occlusion_dir, f"{pair_label}_mask_2.png"))
+
+
+            # save correspondences visualization
+            if plot_correspondences:
+                # [1, N, 2] -> [N, 2]
+                pts1 = batch["points1"][0].cpu() 
+                pts2 = batch["points2"][0].cpu()
+                
+                num_to_plot = len(pts1) 
+                
+                best_pts1 = pts1[:num_to_plot]
+                best_pts2 = pts2[:num_to_plot]
+                
+                save_path = os.path.join(correspondences_dir, f"{pair_label}.png")
+                estimators.dfrm.plot_correspondences( 
+                    batch["image1"][0].cpu(), # [1, C, H, W] -> [C, H, W]
+                    batch["image2"][0].cpu(), 
+                    best_pts1, 
+                    best_pts2, 
+                    save_path=save_path
+                ) 
+                print(f"  Correspondences visualization saved → {save_path}\n")
+            
+            # Cleanup memory per pair
+            del batch, vis_outputs, pose_A, pose_B, Rt_1_to_2, Rt_2_to_1
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        print(f"[SUCCESS] Finished sequence {seq_id}\n")
+
+
+if __name__ == "__main__":
+
+    config_file = os.path.join(os.path.dirname(__file__), "config.yml")
+    cfg = get_easy_dict_from_yaml_file(config_file)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Setup configurations
+    estimator_dfrm = DFRMPoseEstimator(cfg, device=device)
+
+    cfg_mapanything = EasyDict(copy.deepcopy(cfg))
+    cfg_mapanything['use_mapanything'] = True
+    estimator_mapanything = CameraPoseEstimator(cfg_mapanything, device=device)
+
+    cfg_da3 = EasyDict(copy.deepcopy(cfg))
+    cfg_da3['use_mapanything'] = False
+    estimator_da3 = CameraPoseEstimator(cfg_da3, device=device)
 
     panorama_pairs = [
-        ('01_prev_2.jpg', '02_prev_1.jpg', '03_center.jpg', '04_next_1.jpg', '05_next_2.jpg',),
-        ('01_prev_2.jpg', '02_prev_1.jpg', '03_center.jpg', '04_next_1.jpg', '05_next_2.jpg',),
-        ('01_prev_2.jpg', '02_prev_1.jpg', '03_center.jpg', '04_next_1.jpg', '05_next_2.jpg',),
-        ('1.jpg', '2.jpg', '3.jpg', '4.jpg')
+        ('01.jpg','02.jpg', '03.jpg', '04.jpg', '05.jpg'),
+        ('01.jpg','02.jpg', '04.jpg', '05.jpg', '03.jpg'),
 
+        ( '05.jpg', '03.jpg', '01.jpg','02.jpg', '04.jpg'),
+        ('02.jpg', '01.jpg', '04.jpg', '03.jpg', '05.jpg'),
     ]
 
     sequence_ids = [
-        "0b1aefa9-2a60-4ae7-a208-f6a934065086",
-        "0b0838fe-7e19-4099-a77b-bc09fb406873",
-        "0555c731-9dfb-4c23-8440-283d2fa20f69",
-        'argentina_835-Calle-57-La-Plata_11-2024'
+        "montreuil_rue_du_berger",
+        "montreuil_rue_du_berger",
+        "montreuil_rue_du_berger",
+        "montreuil_rue_du_berger",
     ]
 
-    for seq_id , panorama_names in zip(sequence_ids, panorama_pairs):
-        print(f"\n\n{'#'*80}\nProcessing Sequence: {seq_id}, Panoramas: {panorama_names}\n{'#'*80}\n")
-        panorama_paths = [os.path.join(args['data_path_ext'], seq_id, name) for name in panorama_names]
+    # compare DFRM RT with CameraPoseEstimator RT on the same panorama pair
+    if cfg.execution_mode == "compare_pose":
+        for seq_id , panorama_names in zip(sequence_ids, panorama_pairs):
+            print(f"\n\n{'#'*80}\nProcessing Sequence: {seq_id}, Panoramas: {panorama_names}\n{'#'*80}\n")
+            panorama_paths = [os.path.join(cfg['data_path_ext'], seq_id, name) for name in panorama_names]
+            compare_RT_computed(panorama_paths, seq_id, cfg, estimator_da3, estimator_mapanything, estimator_dfrm)    
+            gc.collect()
+            torch.cuda.empty_cache()
 
-        depth_estimator.compare(panorama_paths[0], seq_id)  # Compare depth maps for the first panorama as an example
-        
+    # occlusion mask generation for a given panorama pair
+    if cfg.execution_mode == "occlusion_mask":
+        for seq_id , (panorama_a_name, panorama_b_name) in zip(sequence_ids, panorama_pairs):
+            print(f"\n\n{'#'*80}\nProcessing Sequence: {seq_id}, Panoramas: {panorama_a_name} -> {panorama_b_name}\n{'#'*80}\n")
+            panorama_a_path = os.path.join(cfg['data_path_ext'], seq_id, panorama_a_name)
+            panorama_b_path = os.path.join(cfg['data_path_ext'], seq_id, panorama_b_name)
+            save_dir = os.path.join(cfg['output_dir_ext'], seq_id, 'occlusion_masks')
+            compare_occlusion_masks(panorama_a_path, panorama_b_path, seq_id, save_dir, cfg, device, estimator_da3, estimator_mapanything, estimator_dfrm)
 
-
-
-
-
-
-# # occlusion mask generation for a given panorama pair, not completely debugged
-# if __name__ == "__main__":
-
-#     camerapose_occlusionmsk = "pose"# "pose" or "occlusion_mask"
-#     config_file = os.path.join(os.path.dirname(__file__), "config.yml")
-#     args = get_easy_dict_from_yaml_file(config_file)
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-#     # Setup configurations
-#     estimator_dfrm = DFRMPoseEstimator(args, device=device)
-
-#     cfg_mapanything = EasyDict(copy.deepcopy(args))
-#     cfg_mapanything['use_mapanything'] = True
-#     estimator_mapanything = CameraPoseEstimator(cfg_mapanything, device=device)
-
-#     cfg_da3 = EasyDict(copy.deepcopy(args))
-#     cfg_da3['use_mapanything'] = False
-#     estimator_da3 = CameraPoseEstimator(cfg_da3, device=device)
-
-
-#     # panorama_pairs = [
-#     #     ('01_to_03_buildings_after.png', '01_to_03_buildings_before.png'),
-#     #     ('01_to_02_buildings_after.png', '01_to_02_buildings_before.png'),
-#     #      ('01_to_03_buildings_after.png', '01_to_03_buildings_before.png'),
-#     # ]
-
-#     # sequence_ids = [
-#     #     "2a0047d3-8cb0-47e9-ab51-2b59af8b0b5a",
-#     #    "e2851a09-cc55-488a-a230-648e37feaf8b",
-#     #     "f7c00cfc-b1c2-4acc-9986-79f9bbc5941d", 
-#     # ]
-
-#     # panorama_pairs = [
-#     #     # ('01_prev_2.jpg', '02_prev_1.jpg'),
-#     #     # ('03_center.jpg', 'buffer_01.jpg'),
-#     #     # ('03_center.jpg', '04_next_1.jpg', 'buffer_01.jpg'),
-#     #     # ('03_center.jpg', '04_next_1.jpg', 'buffer_04.jpg'),
-        
-#     #     # ('03_center.jpg', '04_next_1.jpg', 'buffer_02.jpg'),
-#     #     # ('03_center.jpg', 'buffer_01.jpg'),
-
-#     #     # ('02_prev_1.jpg', '03_center.jpg', 'buffer_01.jpg'),
-#     # ]
-
-#     # sequence_ids = [
-#     #     "0b1aefa9-2a60-4ae7-a208-f6a934065086",
-#     #     "0b1aefa9-2a60-4ae7-a208-f6a934065086",
-#     #     "0b1aefa9-2a60-4ae7-a208-f6a934065086",
-#     #     "0b1aefa9-2a60-4ae7-a208-f6a934065086",
-
-
-#     #     "0b0838fe-7e19-4099-a77b-bc09fb406873",
-#     #     "0b0838fe-7e19-4099-a77b-bc09fb406873",
-
-#     #     "0555c731-9dfb-4c23-8440-283d2fa20f69",
-#     # ]
-
-
-#     panorama_pairs = [
-#         # ('01_prev_2.jpg', '02_prev_1.jpg', '03_center.jpg', '04_next_1.jpg', '05_next_2.jpg',),
-#         # ('01_prev_2.jpg', '02_prev_1.jpg', '03_center.jpg', '04_next_1.jpg', '05_next_2.jpg',),
-#         # ('01_prev_2.jpg', '02_prev_1.jpg', '03_center.jpg', '04_next_1.jpg', '05_next_2.jpg',),
-#         ('1.jpg', '2.jpg', '3.jpg', '4.jpg')
-
-#     ]
-
-#     sequence_ids = [
-#         # "0b1aefa9-2a60-4ae7-a208-f6a934065086",
-#         # "0b0838fe-7e19-4099-a77b-bc09fb406873",
-#         # "0555c731-9dfb-4c23-8440-283d2fa20f69",
-#         'argentina_835-Calle-57-La-Plata_11-2024'
-#     ]
-
-
-#     # panorama_pairs = [
-#     #     ('panorama3_original.png','panorama3_same street, heavy snow, _canny_depth_segmented_sd_strength0.8.png'),
-#     #     ('panorama7_original.png','panorama7_same street, heavy snow, _canny_depth_segmented_sd_strength0.8.png'),
-#     #     ('panorama8_original.png','panorama8_same street, heavy snow, _canny_depth_segmented_sd_strength0.8.png'),
-
-
-#     # ]
-
-#     # sequence_ids = [
-#     #     "fake",
-#     #     "fake",
-#     #     "fake",
-
-#     # ]
-
-
-#     # # compare DFRM RT with CameraPoseEstimator RT on the same panorama pair
-#     if camerapose_occlusionmsk == "pose":
-#         for seq_id , panorama_names in zip(sequence_ids, panorama_pairs):
-#             print(f"\n\n{'#'*80}\nProcessing Sequence: {seq_id}, Panoramas: {panorama_names}\n{'#'*80}\n")
-#             panorama_paths = [os.path.join(args['data_path_ext'], seq_id, name) for name in panorama_names]
-#             compare_RT_computed(panorama_paths, seq_id, args, estimator_da3, estimator_mapanything, estimator_dfrm)    
-#             gc.collect()
-#             torch.cuda.empty_cache()
-
-#     # occlusion mask generation for a given panorama pair, not completely debugged
-#     if camerapose_occlusionmsk == "occlusion_mask":
-#         for seq_id , (panorama_a_name, panorama_b_name) in zip(sequence_ids, panorama_pairs):
-#             print(f"\n\n{'#'*80}\nProcessing Sequence: {seq_id}, Panoramas: {panorama_a_name} -> {panorama_b_name}\n{'#'*80}\n")
-#             panorama_a_path = os.path.join(args['data_path_ext'], seq_id, panorama_a_name)
-#             panorama_b_path = os.path.join(args['data_path_ext'], seq_id, panorama_b_name)
-#             save_dir = os.path.join(args['output_dir_ext'], seq_id, 'occlusion_masks')
-#             compare_occlusion_masks(panorama_a_path, panorama_b_path, seq_id, save_dir, args, device, estimator_da3, estimator_mapanything, estimator_dfrm)
+    # compare depth maps generated by mapanything and DepthAnything3 for the same panorama
+    if cfg.execution_mode == "compare_depth":
+        depth_estimator = DepthEstimation(cfg, mode="single")
+        for seq_id , panorama_names in zip(sequence_ids, panorama_pairs):
+            print(f"\n\n{'#'*80}\nProcessing Sequence: {seq_id}, Panoramas: {panorama_names}\n{'#'*80}\n")
+            panorama_paths = [os.path.join(cfg['data_path_ext'], seq_id, name) for name in panorama_names]
+            depth_estimator.compare(panorama_paths[0], seq_id)  # Compare depth maps for the first panorama as an example
+    
+    # full pipeline execution: computes global RTs with MapAnything, generates occlusion masks for all pairs, and saves visualizations
+    if cfg.execution_mode == "pipeline":
+        estimators = EasyDict()
+        estimators.dfrm = estimator_dfrm
+        estimators.mapanything = estimator_mapanything
+        estimators.depth = DepthEstimation(cfg, mode="single")
+        torch.set_float32_matmul_precision('highest')
+        run_full_pipeline(panorama_pairs, sequence_ids, cfg, estimators, device)
+    
