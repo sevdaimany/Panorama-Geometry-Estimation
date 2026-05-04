@@ -78,7 +78,7 @@ def compare_RT_computed(image_paths, sequence_id, cfg, estimator_da3, estimator_
     print(f"\n{'='*50}\nComparing Trajectories for {num_images} images...\n{'='*50}")
 
     output_dir = cfg['output_dir_ext']
-    cubemap_dir = os.path.join(output_dir, sequence_id, 'trajectory')
+    cubemap_dir = os.path.join(output_dir, 'trajectory', sequence_id)
     os.makedirs(cubemap_dir, exist_ok=True)
     
     # Extract names for saving and plotting
@@ -142,6 +142,7 @@ def compare_occlusion_masks(image_a_path, image_b_path, sequence_id, save_dir, c
 def run_full_pipeline(image_names_list, sequence_ids, cfg, estimators, device):
     plot_depth_maps = True
     plot_correspondences = True
+    use_map_depth = True
 
     for seq_id, image_names in zip(sequence_ids, image_names_list):
         print(f"\n{'#'*80}\nProcessing Sequence: {seq_id}\n{'#'*80}")
@@ -150,7 +151,8 @@ def run_full_pipeline(image_names_list, sequence_ids, cfg, estimators, device):
 
         image_paths = [os.path.join(cfg['data_path_ext'], seq_id, name) for name in image_names]
         
-        vis_dir = os.path.join(cfg['output_dir_ext'], 'visualization', seq_id)
+        folder_name = f"pipeline_visualization_{'mapdepth' if use_map_depth else 'dapdepth'}"
+        vis_dir = os.path.join(cfg['output_dir_ext'], folder_name, seq_id)
         occlusion_dir = os.path.join(vis_dir, 'occlusion_masks')
         poses_dir = os.path.join(vis_dir, 'trajectory')
         correspondences_dir = os.path.join(vis_dir, 'correspondences')
@@ -189,8 +191,9 @@ def run_full_pipeline(image_names_list, sequence_ids, cfg, estimators, device):
 
         
         # C) Run DepthEstimation class for MapAnything Depth
-        # print(f"[INFO] Extracting MapAnything Depth batch...")
-        # mapanything_depths, scaling_factors = estimators.depth.run_mapanything_batch(image_paths)
+        if use_map_depth:
+            print(f"[INFO] Extracting MapAnything Depth batch...")
+            mapanything_depths, scaling_factors = estimators.depth.run_mapanything_batch(image_paths)
 
         # D) Cache DFRM single-image requirements (Image tensor + MapAnything depth)
         for idx, path in enumerate(image_paths):
@@ -198,13 +201,15 @@ def run_full_pipeline(image_names_list, sequence_ids, cfg, estimators, device):
             with torch.no_grad():
                 cached_data = estimators.dfrm.preprocess_single_image(path)
             
-            # ma_depth_numpy = mapanything_depths[idx]
-            # if (ma_depth_numpy.shape[1], ma_depth_numpy.shape[0]) != target_size_wh:
-            #     ma_depth_numpy = cv2.resize(ma_depth_numpy, target_size_wh, interpolation=cv2.INTER_NEAREST)
-            
-            # depth_tensor = torch.from_numpy(ma_depth_numpy)
+            if use_map_depth:
+                ma_depth_numpy = mapanything_depths[idx]
+                if (ma_depth_numpy.shape[1], ma_depth_numpy.shape[0]) != target_size_wh:
+                    ma_depth_numpy = cv2.resize(ma_depth_numpy, target_size_wh, interpolation=cv2.INTER_NEAREST)
 
-            depth_tensor = cached_data["depth"]  # [1, H, W], DAP
+                depth_tensor = torch.from_numpy(ma_depth_numpy)
+            else:
+                depth_tensor = cached_data["depth"]  # [1, H, W], DAP
+
             print(f"Original Depth Tensor Shape: {depth_tensor.shape}, Min: {depth_tensor.min().item():.4f}, Max: {depth_tensor.max().item():.4f}, Median: {torch.median(depth_tensor).item():.4f}")
 
             # Post-process to fix zero depth values in the sky region
@@ -330,21 +335,35 @@ if __name__ == "__main__":
 
     # Setup configurations
     estimator_dfrm = DFRMPoseEstimator(cfg, device=device)
-
-    cfg_mapanything = EasyDict(copy.deepcopy(cfg))
-    cfg_mapanything['use_mapanything'] = True
-    estimator_mapanything = CameraPoseEstimator(cfg_mapanything, device=device)
-
-    cfg_da3 = EasyDict(copy.deepcopy(cfg))
-    cfg_da3['use_mapanything'] = False
-    estimator_da3 = CameraPoseEstimator(cfg_da3, device=device)
+    estimator_mapanything = CameraPoseEstimator(cfg, model_name="mapanything", device=device)
+    estimator_da3 = CameraPoseEstimator(cfg, model_name="depthanything", device=device)
 
     panorama_pairs = [
+        # ('1.png', ),
         ('01.jpg','02.jpg', '03.jpg', '04.jpg', '05.jpg'),
+        ('02_to_03_buildings_before.png', '02_to_03_buildings_inpainted.png'),
+        ('01_prev_2.jpg', '02_prev_1.jpg', '03_center.jpg', '04_next_1.jpg', '05_next_2.jpg'),
+        ('1.jpg', '2.jpg', '3.jpg', '4.jpg'),
+        ('01_prev_2.jpg', '02_prev_1.jpg', '03_center.jpg', '04_next_1.jpg', '05_next_2.jpg',),
+        ('01_prev_2.jpg', '02_prev_1.jpg', '03_center.jpg', '04_next_1.jpg', '05_next_2.jpg',),
+        ('panorama3_original.png','panorama3_same street, heavy snow, _canny_depth_segmented_sd_strength0.8.png'),
+        ('panorama7_original.png','panorama7_same street, heavy snow, _canny_depth_segmented_sd_strength0.8.png'),
+        ('panorama8_original.png','panorama8_same street, heavy snow, _canny_depth_segmented_sd_strength0.8.png'),
+
     ]
 
     sequence_ids = [
+        # "samy",
         "montreuil_rue_du_berger",
+        "90fe3d58-5255-4542-bb5b-9ad552160f3f",
+        "0b1aefa9-2a60-4ae7-a208-f6a934065086", 
+        "argentina_835-Calle-57-La-Plata_11-2024", 
+        "0b0838fe-7e19-4099-a77b-bc09fb406873",
+        "0555c731-9dfb-4c23-8440-283d2fa20f69",
+        "fake",
+        "fake",
+        "fake",
+
     ]
 
     # compare DFRM RT with CameraPoseEstimator RT on the same panorama pair
@@ -367,7 +386,7 @@ if __name__ == "__main__":
 
     # compare depth maps generated by mapanything and DepthAnything3 for the same panorama
     if cfg.execution_mode == "compare_depth":
-        depth_estimator = DepthEstimation(cfg, mode="single")
+        depth_estimator = DepthEstimation(cfg)
         for seq_id , panorama_names in zip(sequence_ids, panorama_pairs):
             print(f"\n\n{'#'*80}\nProcessing Sequence: {seq_id}, Panoramas: {panorama_names}\n{'#'*80}\n")
             panorama_paths = [os.path.join(cfg['data_path_ext'], seq_id, name) for name in panorama_names]
