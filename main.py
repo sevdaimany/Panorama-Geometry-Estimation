@@ -78,7 +78,7 @@ def compare_RT_computed(image_paths, sequence_id, cfg, estimator_da3, estimator_
     print(f"\n{'='*50}\nComparing Trajectories for {num_images} images...\n{'='*50}")
 
     output_dir = cfg['output_dir_ext']
-    cubemap_dir = os.path.join(output_dir, sequence_id, 'cubemaps')
+    cubemap_dir = os.path.join(output_dir, sequence_id, 'trajectory')
     os.makedirs(cubemap_dir, exist_ok=True)
     
     # Extract names for saving and plotting
