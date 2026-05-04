@@ -114,8 +114,8 @@ class CameraPoseEstimator:
             start_x = i * (self.face_size + border_size)
             grid_image[:, start_x:start_x + self.face_size] = face_images[i]
 
-        cv2.imwrite(os.path.join(output_dir, sequence_id, 'cubemaps', f'{image_name}_cubemap_faces.png'), grid_image)
-        print(f'[INFO] Saved cubemap faces for {image_name} to {os.path.join(output_dir, sequence_id, "cubemaps", f"{image_name}_cubemap_faces.png")}')
+        cv2.imwrite(os.path.join(output_dir, f'{image_name}_cubemap_faces.png'), grid_image)
+        print(f'[INFO] Saved cubemap faces for {image_name} to {os.path.join(output_dir, f"{image_name}_cubemap_faces.png")}')
 
     def inference_mapanything(self, face_images):
         '''
@@ -139,7 +139,6 @@ class CameraPoseEstimator:
         for pred in ma_predictions:
             pose = pred['camera_poses'].cpu().numpy().squeeze(0)
             scale = pred['metric_scaling_factor'].item()
-            # print(f'[DEBUG] MapAnything scale:\n{scale}')
             ma_poses.append(pose)
             
         print(f'[INFO] MapAnything predicted poses shape: {ma_poses[0].shape}')
@@ -353,7 +352,7 @@ class CameraPoseEstimator:
         ax.plot([mpl_ip_center[0], mpl_up[0]], [mpl_ip_center[1], mpl_up[1]], [mpl_ip_center[2], mpl_up[2]], color='green', linewidth=3)
     
 
-    def verify_poses_visually(self, rt_matrices, names, sequence_id, image_name="trajectory"):
+    def verify_poses_visually(self, rt_matrices, names, sequence_id, image_name="trajectory", output_dir=None):
         """
         Creates an Isometric 3D plot of N Panoramas using frustums with dynamically scaling sizes.
         """
@@ -442,7 +441,10 @@ class CameraPoseEstimator:
 
         ax.view_init(elev=20, azim=-45)
 
-        save_path = os.path.join(self.cfg['output_dir_ext'], sequence_id, "cubemaps", f'{image_name}.png')
+        if output_dir is None:
+            output_dir = os.path.join(self.cfg['output_dir_ext'], sequence_id, "trajectory")
+
+        save_path = os.path.join(output_dir, f'{image_name}.png')
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
