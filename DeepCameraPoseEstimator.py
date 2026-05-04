@@ -442,7 +442,7 @@ class CameraPoseEstimator:
         ax.view_init(elev=20, azim=-45)
 
         if output_dir is None:
-            output_dir = os.path.join(self.cfg['output_dir_ext'], sequence_id, "trajectory")
+            output_dir = os.path.join(self.cfg['output_dir_ext'], "trajectory", sequence_id)
 
         save_path = os.path.join(output_dir, f'{image_name}.png')
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
