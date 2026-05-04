@@ -9,16 +9,15 @@ depth_model: 'dap' # 'unidepth' or 'dap'
 matching_model: 'romav2' # 'superglue' or 'romav2' or 'roma'
 
 
-use_mapanything: True
 mapanything_model_name: "facebook/map-anything"
 depthanything_model_name: "depth-anything/DA3NESTED-GIANT-LARGE-1.1"
 translation_tolerance: 3
 face_size: 518
 num_views: 8  # (8 views = 45 degree steps)
 fov_degrees: 90.0
-output_dir_ext: 'results'
+output_dir_ext: 'results_all_settings'
 
 # data_path_ext: "/mnt/stores/store-DAI/pocs/simany/results_pipeline/v1.2/data/"
 data_path_ext: "diff_sequences"
 save_correspondences: True
-execution_mode: "occlusion_mask"  # Change this to 'pipeline', 'compare_depth', 'compare_pose'.
+execution_mode: "pipeline"  # Change this to 'pipeline', 'compare_depth', 'compare_pose', 'occlusion_mask'.
