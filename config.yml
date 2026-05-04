@@ -1,11 +1,7 @@
 dap_config_path: "vendor/DAP/config/infer.yaml"
 dap_load_weights_dir: "vendor/DAP/weights"
 
-load_weights_from: "./cyws-3d.ckpt"
-registration_strategy: "3d"
 input_size: [1536, 640]
-apply_resize: False
-intraclasse: False
 use_magsac: True
 
 output_dir: "training_artifacts"
@@ -25,3 +21,4 @@ output_dir_ext: 'results'
 # data_path_ext: "/mnt/stores/store-DAI/pocs/simany/results_pipeline/v1.2/data/"
 data_path_ext: "diff_sequences"
 save_correspondences: True
+execution_mode: "occlusion_mask"  # Change this to 'pipeline', 'compare_depth', 'compare_pose'.
