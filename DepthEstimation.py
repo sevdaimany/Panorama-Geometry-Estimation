@@ -18,13 +18,17 @@ from PIL import Image
 
 
 class DepthEstimation:
-    def __init__(self, cfg):
+    def __init__(self, cfg, mode="compare"):
         self.cfg = cfg
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # Load both models
-        self.dap_model = self._load_dap_depth_model()
-        self.mapanything_model = self._load_mapanything_model()
+        self.mode = mode
+
+        if self.mode == "single":
+            self.mapanything_model = self._load_mapanything_model()  
+        else:
+            # Load both models
+            self.dap_model = self._load_dap_depth_model()
+            self.mapanything_model = self._load_mapanything_model()
 
     def _load_dap_depth_model(self):
         config_path = self.cfg.dap_config_path
@@ -50,7 +54,7 @@ class DepthEstimation:
             raise FileNotFoundError(f"Could not load image at {panorama_path}")
         
         width, height = self.cfg.input_size
-        img = img.resize((width, height), resample=Image.BICUBIC)
+        img = img.resize((width, height), resample=Image.Resampling.LANCZOS)
         
         return np.array(img)
         
@@ -68,11 +72,16 @@ class DepthEstimation:
         return depth_map
     
     def run_dap_batch(self, panorama_paths):
-        # Load and preprocess all panoramas
-        panorama_tensors = [self._load_and_preprocess_panorama(path) for path in panorama_paths]
+        panorama_tensors = []
+        for path in panorama_paths:
+            img_np = self._load_and_preprocess_panorama(path)
+            # Convert to Tensor and rearrange from (H, W, C) to (C, H, W)
+            img_tensor = torch.from_numpy(img_np).permute(2, 0, 1)
+            panorama_tensors.append(img_tensor)
+            
+        #(B, C, H, W)
         panorama_tensors = torch.stack(panorama_tensors)
         
-        # panorama_tensors should be shape (B, C, H, W)
         with torch.no_grad():
             depth_maps = DAP_infer.infer_raw(self.dap_model, self.device, panorama_tensors)
         
@@ -108,7 +117,7 @@ class DepthEstimation:
             depth_z = cv2.resize(
                 depth_z, 
                 (width, height), 
-                interpolation=cv2.INTER_LINEAR
+                interpolation=cv2.INTER_NEAREST
             )
             
         return depth_z
@@ -129,10 +138,16 @@ class DepthEstimation:
         # Extract Z-depth for all images in the batch
         # Returns a list of 2D numpy arrays
         depth_maps = []
+        scaling_factors = []
         for pred in predictions:
-            depth_maps.append(pred["depth_z"].squeeze().cpu().numpy())
+            pred_depth = pred["depth_z"].squeeze().cpu().numpy()
+            # Get the scaling factor as a simple Python float
+            scale = pred["metric_scaling_factor"].squeeze().cpu().item()
+            scaling_factors.append(scale)
+
+            depth_maps.append(pred_depth)
             
-        return depth_maps
+        return depth_maps, scaling_factors
 
     def compare(self, panorama_path, seq_id):
         """
