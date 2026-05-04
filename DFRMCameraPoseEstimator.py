@@ -17,14 +17,10 @@ import gc
 import torch.nn as nn
 from pytorch3d.structures import Pointclouds
 from pytorch3d.renderer import AlphaCompositor, PerspectiveCameras, PointsRasterizationSettings, PointsRasterizer, PointsRenderer
-
 import numpy as np
 from matplotlib.patches import ConnectionPatch
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-
-
-
 
 class DFRMPoseEstimator:
     """
@@ -69,6 +65,70 @@ class DFRMPoseEstimator:
     @staticmethod
     def _read_image_as_tensor(pil_image):
         return pil_to_tensor(pil_image).float()
+    
+    def preprocess_single_image(self, image_path):
+        """Phase 1: Load image, resize, crop, and predict depth (Runs ONCE per image)."""
+
+        img_pil = self._read_image_as_pilrgb(image_path)
+
+        target_size = tuple(self.cfg.input_size)
+        if img_pil.size != target_size:
+            img_pil = img_pil.resize(self.cfg.input_size, resample=Image.Resampling.LANCZOS)
+        
+        img_tensor = self._read_image_as_tensor(img_pil)
+
+        # Zero out the bottom 23%
+        h, w = img_tensor.shape[-2:]
+        img_tensor[:, int(h*0.77):, :] = 0
+
+        # Depth Estimation
+        depth_np = DAP_infer.infer_raw(self.depth_predictor, self.device, img_tensor.permute(1, 2, 0).numpy())
+        depth_tensor = torch.from_numpy(depth_np)
+        
+        # First Normalization
+        img_tensor = img_tensor / 255.0
+        
+        return {"image": img_tensor, 
+                "depth": depth_tensor,
+                 "path": image_path}
+
+    def prepare_pair_from_cache(self, data_A, data_B):
+        """Phase 2: Extract correspondences and finalize batch using cached data (Runs per PAIR)."""
+        item = {
+            "image1_path": data_A["path"],
+            "image2_path": data_B["path"],
+            "image1": data_A["image"].clone(),
+            "image2": data_B["image"].clone(),
+            "depth1": data_A["depth"].clone() if data_A["depth"] is not None else None,
+            "depth2": data_B["depth"].clone() if data_B["depth"] is not None else None,
+            # "ma_scale1": data_A["ma_scale"], 
+            # "ma_scale2": data_B["ma_scale"], 
+            "registration_strategy": "3d",
+        }
+        
+        for key in ["intrinsics1", "intrinsics2", "rotation1", "rotation2", "position1", "position2", "transfm2d_1_to_2", "transfm2d_2_to_1", "focale1", "focale2"]:
+            item[key] = None
+            
+        # Correspondence Extraction
+        dummy_batch = {k: [v] for k, v in item.items()}
+        dummy_batch = self.correspondence_extractor(dummy_batch)
+        for k, v in dummy_batch.items():
+            item[k] = v[0]
+            
+      
+        item["image1"] = self._normalise_image(item["image1"])
+        item["image2"] = self._normalise_image(item["image2"])
+
+        # Package into Batch
+        batch = {}
+        for k, v in item.items():
+            if torch.is_tensor(v):
+                batch[k] = v.unsqueeze(0).to(self.device)
+            elif isinstance(v, (int, float)):
+                batch[k] = torch.tensor([v], dtype=torch.float32).to(self.device)
+            else:
+                batch[k] = [v]
+        return batch
 
     def prepare_batch(self, image_a_path, image_b_path, sequence_id):
         """Prepares a pair of images for DFRM extraction."""
@@ -86,10 +146,10 @@ class DFRMPoseEstimator:
         target_size = tuple(self.cfg.input_size)
         if img1_pil.size != target_size:
             print(f"[WARNING] Resizing image1 from {img1_pil.size} to {self.cfg.input_size}.")
-            img1_pil = img1_pil.resize(self.cfg.input_size, resample=Image.BICUBIC)
+            img1_pil = img1_pil.resize(self.cfg.input_size, resample=Image.Resampling.LANCZOS)
         if img2_pil.size != target_size:
             print(f"[WARNING] Resizing image2 from {img2_pil.size} to {self.cfg.input_size}.")
-            img2_pil = img2_pil.resize(self.cfg.input_size, resample=Image.BICUBIC)
+            img2_pil = img2_pil.resize(self.cfg.input_size, resample=Image.Resampling.LANCZOS)
         
         item['image1'] = self._read_image_as_tensor(img1_pil)
         item['image2'] = self._read_image_as_tensor(img2_pil)
@@ -136,20 +196,8 @@ class DFRMPoseEstimator:
             ) 
             print(f"  Correspondences visualization saved → {save_path}\n")
 
-        # 6. Resizing & Final Normalization
-        if self.cfg.apply_resize:
-            target_shape = (224, 224)
-            nearest_resize = K.augmentation.Resize(target_shape, resample=0, align_corners=None, keepdim=True)
-            bicubic_resize = K.augmentation.Resize(target_shape, resample=2, keepdim=True)
-
-            item["image1"] = bicubic_resize(self._normalise_image(item["image1"]))
-            item["image2"] = bicubic_resize(self._normalise_image(item["image2"]))
-
-            if item["depth1"] is not None: item["depth1"] = nearest_resize(item["depth1"])
-            if item["depth2"] is not None: item["depth2"] = nearest_resize(item["depth2"])
-        else:
-            item["image1"] = self._normalise_image(item["image1"])
-            item["image2"] = self._normalise_image(item["image2"])
+        item["image1"] = self._normalise_image(item["image1"])
+        item["image2"] = self._normalise_image(item["image2"])
 
         # 7. Package into Batch
         print("[INFO] Computing RT Matrix...")
@@ -167,30 +215,49 @@ class DFRMPoseEstimator:
         """
         Helper function to plot correspondences.
         """
-        fig, axarr = plt.subplots(1, 2, figsize=(24, 8))
+        IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+        if source_image.min() < 0 or source_image.max() > 1:
+            source_image = (source_image * IMAGENET_STD + IMAGENET_MEAN).clamp(0, 1)
+        if target_image.min() < 0 or target_image.max() > 1:
+            target_image = (target_image * IMAGENET_STD + IMAGENET_MEAN).clamp(0, 1)
+
         if torch.is_tensor(source_image):
             source_image = K.tensor_to_image(source_image)
+            
         if torch.is_tensor(target_image):
             target_image = K.tensor_to_image(target_image)
+
+        fig, axarr = plt.subplots(1, 2, figsize=(24, 8))
         axarr[0].imshow(source_image)
         axarr[0].axis('off')
         axarr[1].imshow(target_image)
         axarr[1].axis('off')
+        
         source_points = source_points * torch.tensor([source_image.shape[1], source_image.shape[0]])
         target_points = target_points * torch.tensor([target_image.shape[1], target_image.shape[0]])
 
         for i, (pt_q, pt_t) in enumerate(zip(source_points, target_points)):
-                col = (np.random.random(), np.random.random(), np.random.random())
-                con = ConnectionPatch(pt_t, pt_q,
-                                    coordsA='data', coordsB='data',
-                                    axesA=axarr[1], axesB=axarr[0],
-                                    color='g', linewidth=0.7)
-                axarr[1].add_artist(con)
-                axarr[0].plot(pt_q[0], pt_q[1], c=col, marker='x')
-                axarr[1].plot(pt_t[0], pt_t[1], c=col, marker='x')
+            # Cast PyTorch tensors to standard Python floats to prevent Matplotlib crashes
+            x1, y1 = float(pt_q[0]), float(pt_q[1])
+            x2, y2 = float(pt_t[0]), float(pt_t[1])
+            
+            col = (np.random.random(), np.random.random(), np.random.random())
+            
+            con = ConnectionPatch(
+                xyA=(x2, y2), xyB=(x1, y1),
+                coordsA='data', coordsB='data',
+                axesA=axarr[1], axesB=axarr[0],
+                color=col, linewidth=0.7 
+            )
+            axarr[1].add_artist(con)
+            
+            # Draw the markers
+            axarr[0].plot(x1, y1, c=col, marker='x')
+            axarr[1].plot(x2, y2, c=col, marker='x')
 
         plt.subplots_adjust(wspace=0.01, hspace=0)
-        # Save it at 300 DPI for high resolution
         plt.savefig(save_path, bbox_inches="tight", dpi=300, pad_inches=0)
         plt.close(fig)
     
@@ -329,6 +396,52 @@ class DFRMPoseEstimator:
         vutils.save_image(visibility_mask_2[i], os.path.join(save_dir, f"{name}{model_name}_mask_2.png"))
         print(f"\n[SUCCESS] Saved masks to '{save_dir}'")
 
+    def generate_occlusion_mask_tensors(self, batch, Rt_1_to_2_tensor, Rt_2_to_1_tensor):
+        """Warps images to generate occlusion masks and returns tensors to main loop."""
+        IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(3,1,1)
+        IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225], device=self.device).view(3,1,1)
+
+        def denorm(img):
+            return (img * IMAGENET_STD + IMAGENET_MEAN).clamp(0,1)    
+
+        h, w = batch['image1'].shape[-2:]
+
+        if Rt_1_to_2_tensor.dim() == 2: Rt_1_to_2_tensor = Rt_1_to_2_tensor.unsqueeze(0)
+        if Rt_2_to_1_tensor.dim() == 2: Rt_2_to_1_tensor = Rt_2_to_1_tensor.unsqueeze(0)
+
+        Rt_1_to_2_tensor = Rt_1_to_2_tensor.to(self.device, dtype=batch['image1'].dtype)
+        Rt_2_to_1_tensor = Rt_2_to_1_tensor.to(self.device, dtype=batch['image2'].dtype)
+
+        depth1_safe = batch['depth1']
+        depth2_safe = batch['depth2'] 
+
+        visibility = torch.ones((1, 1, h, w), requires_grad=False).type_as(batch['image1'])
+        
+        image1_with_visibility = torch.cat([batch['image1'], visibility], dim=1)
+        image2_with_visibility = torch.cat([batch['image2'], visibility], dim=1)
+
+        K1_inv = torch.eye(3).unsqueeze(0).repeat(1, 1, 1).type_as(batch['image1'])
+        K2_inv = torch.eye(3).unsqueeze(0).repeat(1, 1, 1).type_as(batch['image2'])
+
+        image1_warped = self.feature_warper.warp(image1_with_visibility, depth1_safe, K1_inv, K2_inv, Rt_1_to_2_tensor)
+        image2_warped = self.feature_warper.warp(image2_with_visibility, depth2_safe, K2_inv, K1_inv, Rt_2_to_1_tensor)
+      
+        image1_warped_rgb = image1_warped[:, :3, :, :]
+        visibility_mask_1 = image1_warped[:, -1:, :, :]
+
+        image2_warped_rgb = image2_warped[:, :3, :, :]
+        visibility_mask_2 = image2_warped[:, -1:, :, :]
+
+        i = 0 
+        side_by_side_1 = vutils.make_grid([denorm(batch['image2'][i]), denorm(batch['image1'][i]), denorm(image1_warped_rgb[i])], nrow=3, padding=5, pad_value=0.8)  
+        side_by_side_2 = vutils.make_grid([denorm(batch['image1'][i]), denorm(batch['image2'][i]), denorm(image2_warped_rgb[i])], nrow=3, padding=5, pad_value=0.8)
+
+        return {
+            "side_by_side_1": side_by_side_1,
+            "side_by_side_2": side_by_side_2,
+            "mask_1": visibility_mask_1[i],
+            "mask_2": visibility_mask_2[i]
+        }
 
       
 class DifferentiableFeatureWarper(nn.Module):
@@ -392,37 +505,4 @@ class DifferentiableFeatureWarper(nn.Module):
         )
         # 1. Get the raw render (with the tears at the poles)
         rendered = self.render(src_point_cloud, features.device, (h, w))
-
-        rendered = self.fill_equirectangular_holes(rendered)
-            
         return rendered
-
-    def fill_equirectangular_holes(self, rendered_tensor):
-        """
-        Fixes PyTorch3D polar tearing by stretching rendered pixels horizontally 
-        into the empty gaps, using 360-degree circular wrap-around.
-        """
-        # 1. Identify where PyTorch3D successfully drew pixels (sum of channels > 0)
-        valid_mask = (rendered_tensor.abs().sum(dim=1, keepdim=True) > 0).float()
-        
-        # 2. Kernel width dictates how far to stretch the pixels to fix the tears
-        kernel_width = 25 # Nice wide stretch to bridge the polar gaps
-        pad = kernel_width // 2
-        
-        # 3. Apply Circular Padding (Wrap-around 360 degrees on the Left and Right)
-        # We pad Width (pad, pad) and Height (0, 0)
-        padded_tensor = F.pad(rendered_tensor, (pad, pad, 0, 0), mode='circular')
-        padded_mask = F.pad(valid_mask, (pad, pad, 0, 0), mode='circular')
-        
-        # 4. Smear the tensor horizontally
-        smeared = F.avg_pool2d(padded_tensor, kernel_size=(1, kernel_width), stride=1)
-        valid_smeared = F.avg_pool2d(padded_mask, kernel_size=(1, kernel_width), stride=1)
-        
-        # 5. Normalize the colors
-        filled = smeared / (valid_smeared + 1e-6)
-        
-        # 6.Only apply the smeared pixels to the HOLES! 
-        # Keep the original sharp PyTorch3D pixels where they exist.
-        final_tensor = torch.where(valid_mask > 0, rendered_tensor, filled)
-        
-        return final_tensor
