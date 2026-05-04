@@ -13,16 +13,16 @@ import gc
 from DFRMCameraPoseEstimator import DFRMPoseEstimator
 
 class CameraPoseEstimator:
-    def __init__(self, cfg, device):
+    def __init__(self, cfg, model_name, device):
         self.device = device
         self.cfg = cfg
         self.face_size = self.cfg['face_size']
         self.translation_tolerance = self.cfg['translation_tolerance']
         self.fov_degrees = self.cfg['fov_degrees']
         self.intrinsic_matrix = self.get_intrinsic_matrix(self.fov_degrees)
-        if self.cfg['use_mapanything']:
+        if model_name == "mapanything":
             self.model = MapAnything.from_pretrained(self.cfg['mapanything_model_name']).to(self.device)
-            self.model_name = "mapanything"
+            self.model_name = model_name
         else:
             self.model = DepthAnything3.from_pretrained(self.cfg['depthanything_model_name']).to(self.device)
             self.model_name = "depthanything3"
@@ -114,7 +114,8 @@ class CameraPoseEstimator:
             start_x = i * (self.face_size + border_size)
             grid_image[:, start_x:start_x + self.face_size] = face_images[i]
 
-        cv2.imwrite(os.path.join(output_dir, f'{image_name}_cubemap_faces.png'), grid_image)
+        grid_image_bgr = cv2.cvtColor(grid_image, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(os.path.join(output_dir, f'{image_name}_cubemap_faces.png'), grid_image_bgr)
         print(f'[INFO] Saved cubemap faces for {image_name} to {os.path.join(output_dir, f"{image_name}_cubemap_faces.png")}')
 
     def inference_mapanything(self, face_images):
@@ -262,7 +263,7 @@ class CameraPoseEstimator:
             face_keys_list.append(list(faces.keys()))
             face_counts.append(len(faces))
 
-        if self.cfg['use_mapanything']:
+        if self.model_name == "mapanything":
             predicted_poses = self.inference_mapanything(all_combined_faces)
         else:
             predicted_poses = self.inference_depthanything(all_combined_faces)
