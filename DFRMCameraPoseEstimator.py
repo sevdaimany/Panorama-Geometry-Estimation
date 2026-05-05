@@ -8,8 +8,10 @@ from torchvision.transforms.functional import pil_to_tensor
 from einops import rearrange
 import kornia as K
 from correspondence_extractor import CorrespondenceExtractor
+
 import DAP.test.infer as DAP_infer 
 from DAP.test.infer import load_model as DAP_load_model
+
 import yaml
 import torchvision.utils as vutils
 import geometry as geometry
@@ -77,13 +79,13 @@ class DFRMPoseEstimator:
         
         img_tensor = self._read_image_as_tensor(img_pil)
 
-        # Zero out the bottom 23%
-        h, w = img_tensor.shape[-2:]
-        img_tensor[:, int(h*0.77):, :] = 0
-
         # Depth Estimation
         depth_np = DAP_infer.infer_raw(self.depth_predictor, self.device, img_tensor.permute(1, 2, 0).numpy())
         depth_tensor = torch.from_numpy(depth_np)
+
+        # Zero out the bottom 23%
+        h, w = img_tensor.shape[-2:]
+        img_tensor[:, int(h*0.77):, :] = 0
         
         # First Normalization
         img_tensor = img_tensor / 255.0
@@ -153,18 +155,19 @@ class DFRMPoseEstimator:
         
         item['image1'] = self._read_image_as_tensor(img1_pil)
         item['image2'] = self._read_image_as_tensor(img2_pil)
-        
-        # 2. Zero out the bottom 23% (Crucial for panoramas to hide tripod/car)
-        h1, w1 = item["image1"].shape[-2:]
-        h2, w2 = item["image2"].shape[-2:]
-        item["image1"][:, int(h1*0.77):, :] = 0
-        item["image2"][:, int(h2*0.77):, :] = 0
 
         # 3. Depth Estimation
         print("[INFO] Predicting Depth...")
         if self.cfg.depth_model != "unidepth":
             item["depth1"] = torch.from_numpy(DAP_infer.infer_raw(self.depth_predictor, self.device, item["image1"].permute(1, 2, 0).numpy()))
             item["depth2"] = torch.from_numpy(DAP_infer.infer_raw(self.depth_predictor, self.device, item["image2"].permute(1, 2, 0).numpy()))
+        
+        # 2. Zero out the bottom 23% (Crucial for panoramas to hide tripod/car)
+        h1, w1 = item["image1"].shape[-2:]
+        h2, w2 = item["image2"].shape[-2:]
+
+        item["image1"][:, int(h1*0.77):, :] = 0
+        item["image2"][:, int(h2*0.77):, :] = 0
 
         # 4. First Normalization
         item['image1'] = item['image1'] / 255.0
