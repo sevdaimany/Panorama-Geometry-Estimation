@@ -113,27 +113,42 @@ geometry_estimation/
     └── RoMaV2/                   # RoMa v2 feature matcher
 ```
 
----
 
 ## Installation
 
-**Prerequisites:** Python ≥ 3.9, CUDA-capable GPU, Conda.
+
+
+### Prerequisites
+- Python ≥ 3.10  
+- CUDA 12.1 (adjust depending on your system)  
+- Conda (recommended)
+
+### 1. Create environment
 
 ```bash
-# Create and activate environment
-conda create -n geometry python=3.9
+conda create -n geometry python=3.10 -y
 conda activate geometry
-
-# Install the project (editable)
-pip install -e .
-
-# Install vendor package requirements
-pip install -r vendor/DAP/requirements.txt
-pip install -r vendor/Depth-Anything-3/requirements.txt
-
-# Install PyTorch (CUDA 11.8 example — adjust to your CUDA version)
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 ```
+### 2. Install PyTorch (CUDA 12.1)
+```bash
+pip install torch==2.1.2 torchvision==0.16.2 \
+  --index-url https://download.pytorch.org/whl/cu121
+```
+### 3. Install PyTorch3D
+```bash
+pip install --no-index --no-cache-dir pytorch3d \
+  -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt212/download.html
+```
+
+### 4. Install remaining dependencies
+```bash
+pip install -r requirements.txt
+```
+### 5. Install this project
+```bash
+pip install -e .
+```
+
 
 ## Running the Code
 
