@@ -17,24 +17,14 @@ import random
 import numpy as np
 
 
-
 def seed_everything(seed=42):
     """Locks all sources of randomness for reproducible results."""
-    # 1. Python built-in randomness
     random.seed(seed)
-    
-    # 2. NumPy randomness (Used heavily in data prep)
-    np.random.seed(seed)
-    
-    # 3. OpenCV randomness (CRITICAL for MAGSAC/RANSAC)
-    cv2.setRNGSeed(seed)
-    
-    # 4. PyTorch randomness
+    np.random.seed(seed)    
+    cv2.setRNGSeed(seed)    
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed) # For multi-GPU
-    
-    # 5. Lock down CuDNN (Makes GPU operations deterministic)
+    torch.cuda.manual_seed_all(seed)     
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
@@ -142,7 +132,6 @@ def compare_occlusion_masks(image_a_path, image_b_path, sequence_id, save_dir, c
 def run_full_pipeline(image_names_list, sequence_ids, cfg, estimators, device):
     plot_depth_maps = True
     plot_correspondences = True
-    use_map_depth = True
 
     for seq_id, image_names in zip(sequence_ids, image_names_list):
         print(f"\n{'#'*80}\nProcessing Sequence: {seq_id}\n{'#'*80}")
@@ -151,7 +140,7 @@ def run_full_pipeline(image_names_list, sequence_ids, cfg, estimators, device):
 
         image_paths = [os.path.join(cfg['data_path_ext'], seq_id, name) for name in image_names]
         
-        folder_name = f"pipeline_visualization_{'mapdepth' if use_map_depth else 'dapdepth'}"
+        folder_name = "debugging_pipeline_visualization_mapdepth"
         vis_dir = os.path.join(cfg['output_dir_ext'], folder_name, seq_id)
         occlusion_dir = os.path.join(vis_dir, 'occlusion_masks')
         poses_dir = os.path.join(vis_dir, 'trajectory')
@@ -173,10 +162,10 @@ def run_full_pipeline(image_names_list, sequence_ids, cfg, estimators, device):
         target_size_wh = tuple(cfg.input_size)
         target_size_hw = target_size_wh[::-1]
 
-        # A) Prep panoramas for MapAnything Pose Estimation
+        # Prep panoramas for MapAnything Pose Estimation
         panoramas = load_panoramas(image_paths, target_size_wh=target_size_wh, save_dir=vis_dir)
 
-        # B) Run MapAnything for Poses
+        # Run MapAnything for Poses
         rts_mapanything = estimators.mapanything.run(
             panoramas, 
             seq_id, 
@@ -185,48 +174,35 @@ def run_full_pipeline(image_names_list, sequence_ids, cfg, estimators, device):
             image_names=image_names_for_print
         )
 
-        # run DFRM pose estimation to get relative RTs for all pairs (for occlusion mask generation)
-        # rts_mapanything = estimators.dfrm.estimate_trajectory(image_paths, seq_id)
         rts_numpy = to_numpy_matrices(rts_mapanything)
 
         
-        # C) Run DepthEstimation class for MapAnything Depth
-        if use_map_depth:
-            print(f"[INFO] Extracting MapAnything Depth batch...")
-            mapanything_depths, scaling_factors = estimators.depth.run_mapanything_batch(image_paths)
+        # Run DepthEstimation class for MapAnything Depth
+        print(f"[INFO] Extracting MapAnything Depth batch...")
+        mapanything_depths, scaling_factors = estimators.depth.run_mapanything_batch(image_paths)
 
-        # D) Cache DFRM single-image requirements (Image tensor + MapAnything depth)
+        # Cache DFRM single-image requirements (Image tensor + MapAnything depth)
         for idx, path in enumerate(image_paths):
             print(f"Caching MapAnything depth & image for {os.path.basename(path)}...")
             with torch.no_grad():
                 cached_data = estimators.dfrm.preprocess_single_image(path)
             
-            if use_map_depth:
-                ma_depth_numpy = mapanything_depths[idx]
-                if (ma_depth_numpy.shape[1], ma_depth_numpy.shape[0]) != target_size_wh:
-                    ma_depth_numpy = cv2.resize(ma_depth_numpy, target_size_wh, interpolation=cv2.INTER_NEAREST)
+            ma_depth_numpy = mapanything_depths[idx]
+            if (ma_depth_numpy.shape[1], ma_depth_numpy.shape[0]) != target_size_wh:
+                ma_depth_numpy = cv2.resize(ma_depth_numpy, target_size_wh, interpolation=cv2.INTER_NEAREST)
+            depth_tensor = torch.from_numpy(ma_depth_numpy)
 
-                depth_tensor = torch.from_numpy(ma_depth_numpy)
-            else:
-                depth_tensor = cached_data["depth"]  # [1, H, W], DAP
+            # Sky-only fix. The road is fine as-is.
+            H_d, W_d = depth_tensor.shape
+            v_grid = torch.linspace(0, 1, H_d, device=depth_tensor.device).view(H_d, 1).expand(H_d, W_d)
+            is_above_horizon = v_grid < 0.48
+            sky_broken = (depth_tensor <= 1e-3) & is_above_horizon   # DAP floor pixels above horizon
+            depth_tensor = torch.where(sky_broken, torch.full_like(depth_tensor, 100.0), depth_tensor)
+        
 
-            print(f"Original Depth Tensor Shape: {depth_tensor.shape}, Min: {depth_tensor.min().item():.4f}, Max: {depth_tensor.max().item():.4f}, Median: {torch.median(depth_tensor).item():.4f}")
-
-            # Post-process to fix zero depth values in the sky region
-            height, width = depth_tensor.shape
-            is_top_half = torch.zeros_like(depth_tensor, dtype=torch.bool)
-            is_top_half[..., :height//2, :] = True
-            zero_mask_1 = depth_tensor < 2.5 # DAP
-            # zero_mask_1 = depth_tensor < 1e-3 # MapAnything
-
-            if zero_mask_1.any():
-                print("[INFO] Found zero depth values in the depth map. Applying post-processing to fix sky regions.")
-                depth_tensor[zero_mask_1 & is_top_half] = 100.0  # Force Sky to Max Depth
-            
             cached_data["depth"] = depth_tensor
-            # cached_data["ma_scale"] = scaling_factors[idx]
-
             image_cache[path] = cached_data
+
 
         # plots relative poses
         for i, (rt, name) in enumerate(zip(rts_numpy, image_names_for_print)):
@@ -247,6 +223,7 @@ def run_full_pipeline(image_names_list, sequence_ids, cfg, estimators, device):
             for path in image_paths:
                 depth_tensor = image_cache[path]['depth']
                 depth_map = depth_tensor.squeeze().cpu().numpy()
+
                 plt.figure(figsize=(8, 6))
                 plt.imshow(depth_map, cmap='inferno')
                 plt.title(f"Depth Map for {os.path.basename(path).split('.')[0]}")
@@ -272,31 +249,30 @@ def run_full_pipeline(image_names_list, sequence_ids, cfg, estimators, device):
             
             print(f"  -> Processing pair: {name_a} & {name_b}")
 
-            # 1. Fetch from cache and prepare the pair batch (only calculates correspondences)
+            # Fetch from cache and prepare the pair batch (only calculates correspondences)
             with torch.no_grad():
                 batch = estimators.dfrm.prepare_pair_from_cache(
                     image_cache[img_a_path], 
                     image_cache[img_b_path]
                 )
             
-            # # 2. Calculate RELATIVE RTs from MapAnything Global Poses
+            # Calculate RELATIVE RTs from MapAnything Global Poses
             pose_A = rts_mapanything[idx_a].to(device)
             pose_B = rts_mapanything[idx_b].to(device)
             
             Rt_1_to_2 = torch.inverse(pose_B) @ pose_A 
             Rt_2_to_1 = torch.inverse(pose_A) @ pose_B
 
-            # 3. Generate visual tensors
+            # Generate visual tensors
             with torch.no_grad():
                 vis_outputs = estimators.dfrm.generate_occlusion_mask_tensors(batch, Rt_1_to_2, Rt_2_to_1)
             
-            # 4. Save results
+            # Save results
             pair_label = f"{name_a}_to_{name_b}"
             vutils.save_image(vis_outputs["side_by_side_1"], os.path.join(occlusion_dir, f"{pair_label}_side_by_side_1.png"))
             vutils.save_image(vis_outputs["side_by_side_2"], os.path.join(occlusion_dir, f"{pair_label}_side_by_side_2.png"))
             vutils.save_image(vis_outputs["mask_1"], os.path.join(occlusion_dir, f"{pair_label}_mask_1.png"))
             vutils.save_image(vis_outputs["mask_2"], os.path.join(occlusion_dir, f"{pair_label}_mask_2.png"))
-
 
             # save correspondences visualization
             if plot_correspondences:

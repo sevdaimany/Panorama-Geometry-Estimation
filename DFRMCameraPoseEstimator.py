@@ -79,10 +79,6 @@ class DFRMPoseEstimator:
         
         img_tensor = self._read_image_as_tensor(img_pil)
 
-        # Depth Estimation
-        depth_np = DAP_infer.infer_raw(self.depth_predictor, self.device, img_tensor.permute(1, 2, 0).numpy())
-        depth_tensor = torch.from_numpy(depth_np)
-
         # Zero out the bottom 23%
         h, w = img_tensor.shape[-2:]
         img_tensor[:, int(h*0.77):, :] = 0
@@ -91,7 +87,6 @@ class DFRMPoseEstimator:
         img_tensor = img_tensor / 255.0
         
         return {"image": img_tensor, 
-                "depth": depth_tensor,
                  "path": image_path}
 
     def prepare_pair_from_cache(self, data_A, data_B):
@@ -103,8 +98,6 @@ class DFRMPoseEstimator:
             "image2": data_B["image"].clone(),
             "depth1": data_A["depth"].clone() if data_A["depth"] is not None else None,
             "depth2": data_B["depth"].clone() if data_B["depth"] is not None else None,
-            # "ma_scale1": data_A["ma_scale"], 
-            # "ma_scale2": data_B["ma_scale"], 
             "registration_strategy": "3d",
         }
         

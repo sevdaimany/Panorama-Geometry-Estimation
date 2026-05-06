@@ -364,9 +364,7 @@ class CameraPoseEstimator:
         valid_names = []
         mpl_centers = []
         
-        # ==========================================
         # PASS 1: Collect valid centers to find scale
-        # ==========================================
         for rt, name in zip(rt_matrices, names):
             if rt is not None:
                 # Basic sanity check to avoid Matplotlib stretching to infinity
@@ -389,9 +387,7 @@ class CameraPoseEstimator:
             plt.close(fig)
             return
 
-        # ==========================================
         # DYNAMIC SCALE CALCULATION
-        # ==========================================
         if len(mpl_centers) > 1:
             # Calculate distances between consecutive camera steps
             step_distances = [np.linalg.norm(mpl_centers[i] - mpl_centers[i-1]) for i in range(1, len(mpl_centers))]
@@ -407,9 +403,7 @@ class CameraPoseEstimator:
             
         print(f"[INFO] Plotting {image_name} with dynamic camera scale: {dynamic_scale:.2f}")
 
-        # ==========================================
         # PASS 2: Actually plot the data
-        # ==========================================
         for rt, name in zip(valid_matrices, valid_names):
             self.plot_camera_frustum(ax, rt, name, scale=dynamic_scale)
         
