@@ -90,6 +90,12 @@ The figures below show the final pipeline output (`execution_mode: pipeline`) fo
 ![Occlusion side-by-side 2a](results/argentina_835-Calle-57-La-Plata_11-2024/occlusion_masks/1_to_2_side_by_side_1.png)
 ![Occlusion side-by-side 2b](results/argentina_835-Calle-57-La-Plata_11-2024/occlusion_masks/1_to_2_side_by_side_2.png)
 
+
+#### Images from different sequences
+The pipeline remains accurate even when the two images in a pair are captured at different times or originate
+from different sequences.
+
+![Occlusion side-by-side 2c](results/montreuil/01_to_07_side_by_side_2.png)
 ---
 
 ## Project Structure
