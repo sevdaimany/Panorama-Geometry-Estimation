@@ -29,18 +29,20 @@ class DFRMPoseEstimator:
     Encapsulates the Feature Registration Module (DFRM) pipeline, including
     depth estimation, correspondence extraction, and batch preparation.
     """
-    def __init__(self, cfg, device):
+    def __init__(self, cfg, device, mode=""):
         self.cfg = cfg
         self.device = device
-        
+        self.mode = mode
+
         print(f"[INFO] Initializing DFRMPoseEstimator on {self.device}...")
         
         self.feature_warper = DifferentiableFeatureWarper()
-        self.depth_predictor = self._load_dap_depth_model()
-        self.correspondence_extractor = CorrespondenceExtractor(
-            matching_model=cfg.matching_model, 
-            use_magsac=cfg.use_magsac
-        )
+        if self.mode != "pipeline":
+            self.depth_predictor = self._load_dap_depth_model()
+            self.correspondence_extractor = CorrespondenceExtractor(
+                matching_model=cfg.matching_model, 
+                use_magsac=cfg.use_magsac
+            )
 
     def _load_dap_depth_model(self):
         config_path = self.cfg.dap_config_path
@@ -105,10 +107,10 @@ class DFRMPoseEstimator:
             item[key] = None
             
         # Correspondence Extraction
-        dummy_batch = {k: [v] for k, v in item.items()}
-        dummy_batch = self.correspondence_extractor(dummy_batch)
-        for k, v in dummy_batch.items():
-            item[k] = v[0]
+        # dummy_batch = {k: [v] for k, v in item.items()}
+        # dummy_batch = self.correspondence_extractor(dummy_batch)
+        # for k, v in dummy_batch.items():
+        #     item[k] = v[0]
             
       
         item["image1"] = self._normalise_image(item["image1"])

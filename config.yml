@@ -15,9 +15,13 @@ translation_tolerance: 3
 face_size: 518
 num_views: 8  # (8 views = 45 degree steps)
 fov_degrees: 90.0
-output_dir_ext: 'results_all_settings'
+output_dir_ext: 'results_experiments'
 
 # data_path_ext: "/mnt/stores/store-DAI/pocs/simany/results_pipeline/v1.2/data/"
-data_path_ext: "diff_sequences"
 save_correspondences: True
+data_path_ext: "diff_sequences"
+
+
 execution_mode: "pipeline"  # Change this to 'pipeline', 'compare_depth', 'compare_pose', 'occlusion_mask'.
+input_dir_root: "/mnt/stores/store-DAI/pocs/simany/panoramas-sample/"
+output_dir_root: "/mnt/stores/store-DAI/pocs/simany/pipeline2_test/"
